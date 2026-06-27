@@ -14,3 +14,9 @@ probe_out/
 *.swp
 .idea/
 .vscode/
+
+# AI / assistant working files (kept locally, never published)
+AGENTS.md
+CLAUDE.md
+.claude/
+.remember/

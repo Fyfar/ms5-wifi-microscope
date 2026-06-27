@@ -2,7 +2,7 @@
 
 A clean, from-scratch client for the cheap **MS5 WiFi digital microscope** (and likely many similar
 i4season-based WiFi cameras/otoscopes/endoscopes). It connects to the camera over WiFi and streams its
-native **1280×720 MJPEG** video to your **browser, VLC, ffplay, or OBS** — at roughly **~21 fps**.
+native **1280×720 MJPEG** video to your **browser, VLC, ffplay, or OBS** — at up to **~30 fps**.
 
 The official app (`DLscope`) is broken and barely manages **<2 fps**. This project gets the camera's full
 frame rate, runs anywhere Python runs, and **documents the entire reverse-engineered WiFi protocol** so
@@ -13,7 +13,8 @@ other owners can build their own tools.
 - ✅ Live view in a browser, or any MJPEG-capable player (VLC/ffplay/OBS).
 - ✅ Full **protocol documentation** below.
 
-> Status: **working and confirmed on real hardware.** 1280×720 @ ~21 fps.
+> Status: **working and confirmed on real hardware.** 1280×720 @ ~25–30 fps. The resolution-control
+> command is fully decoded too — see [Camera configuration & resolution](#camera-configuration--resolution).
 
 ---
 
@@ -24,6 +25,7 @@ other owners can build their own tools.
 - [Endpoints](#endpoints)
 - [How it works](#how-it-works)
 - [Protocol reference](#protocol-reference)
+- [Camera configuration & resolution](#camera-configuration--resolution)
 - [Troubleshooting](#troubleshooting)
 - [Roadmap / help wanted](#roadmap--help-wanted)
 - [How it was reverse-engineered](#how-it-was-reverse-engineered)
@@ -139,8 +141,8 @@ offset  size  field
 | `0x06` | UpdateFirmware | |
 | `0x0A` | SetLed | (the MS5 has a *physical* LED dial; no app control) |
 | `0x0C` | CameraCommand | camera controls |
-| `0x0D` | GetCameraConfig | |
-| `0x0E` | SetCameraConfig | likely where resolution lives — see roadmap |
+| `0x0D` | GetCameraConfig | current resolution + list of supported modes (see below) |
+| `0x0E` | SetCameraConfig | sets resolution — `{format, width, height}` (see below) |
 
 **GetDeviceInfo response data** (128 bytes): `unk0` `u8`, `vendor` `char[32]`, `product` `char[32]`,
 `fw_version` `char[16]`, `ssid` `char[32]`, then power/capacity/work-mode fields.
@@ -185,7 +187,81 @@ concatenate `payload[16:]` to get one JPEG (`FF D8 … FF D9`). Finalize a frame
 > Note: on this firmware byte 0 stays `0x01` for **every** chunk — do **not** use "byte 0 == 2" as the
 > end-of-frame marker.
 
-Result: **1280×720 MJPEG, ~21 fps** (~330 datagrams/s).
+Result: **1280×720 MJPEG, ~25–30 fps** (~330 datagrams/s).
+
+> **Why the fps drifts (~20↔30):** each frame is an independent JPEG whose size depends on scene
+> content and lighting (a bright, detailed view compresses to a much larger JPEG than a flat/dark one).
+> The camera transmits at a roughly **constant datagram rate**, so `fps ≈ datagrams_per_sec ÷
+> datagrams_per_frame` — bigger frames mean fewer fps. UDP packet loss only lowers the count further (a
+> dropped chunk makes that frame fail `FF D8 … FF D9` validation and it's skipped). So the variation is
+> inherent to MJPEG-over-UDP, not a bug.
+
+---
+
+## Camera configuration & resolution
+
+The camera's resolution is controlled by two real commands on `:10005` — both fully decoded from
+`libWifiCamera.so` and verified on hardware. The included **`probe_resolution.py`** exercises them:
+
+```bash
+python3 probe_resolution.py            # read-only: print current mode + supported modes
+python3 probe_resolution.py 640 480    # request a mode, then verify via read-back
+```
+
+### GetCameraConfig (`type 0x0D`)
+
+Request is the **12-byte header only** (no payload). Response payload:
+
+```
+offset  size  field
+0       1     format          (current pixel format)
+1       2     width   u16 LE   (current)
+3       2     height  u16 LE   (current)
+5       1     count = N supported modes
+6       5×N   N × { format u8, width u16 LE, height u16 LE }
+```
+
+### SetCameraConfig (`type 0x0E`)
+
+Payload is **5 bytes**, the same `{format, width, height}` triple:
+
+```
+EE FF EE FF | id(2) | 0E 00 | 01 | 00 | len(2) | format(1) width(2 LE) height(2 LE)
+```
+
+As with OpenVideo, the reference library writes the header `length` field as `0` but still appends the
+5 payload bytes (19 bytes total).
+
+> ⚠️ **The ack carries no status.** This firmware replies to *every* `SetCameraConfig` with a bare
+> 12-byte header and **no payload**, whether or not the mode was applied. The only reliable way to know
+> if it took effect is to re-read `GetCameraConfig` (or read the `width`/`height` in the live stream's
+> chunk header). `probe_resolution.py` does this read-back automatically.
+
+### What the MS5 actually supports (measured)
+
+The MS5 advertises exactly **two** modes, and **1280×720 is the hard maximum**:
+
+| Mode | format | Result |
+|------|--------|--------|
+| **1280×720** | 1 | native / default |
+| **640×480** | 1 | sets cleanly; smaller image |
+| 1920×1080 (and other higher modes) | — | **not supported** — silently ignored, stays 1280×720 |
+
+Findings from live testing:
+
+- **Higher-than-720p is fake on this device.** The higher resolutions listed in the official app (and in
+  the USB UVC descriptors) are *not* offered by the WiFi firmware — requesting `1920×1080` is accepted at
+  the framing level but ignored; the stream stays `1280×720`.
+- **Lowering resolution gives no fps benefit.** 640×480 runs at the same ~25–30 fps as 720p — the limit
+  is the sensor/encoder frame rate, not pixel throughput, so dropping resolution just gives a smaller,
+  softer image for nothing.
+- **⚠️ Changing the mode at runtime can wedge the video pipeline.** Switching back to 1280×720 mid-session
+  left the encoder producing **no frames** (the command channel still connects/acks). A **physical power
+  cycle** restores it (the camera boots in native 720p). Treat runtime resolution changes as fragile.
+
+**Bottom line:** the resolution command is real and fully documented here, but on the MS5 there is no
+practical reason to use it — 720p is already the maximum and the fastest. `ms5_viewer.py` deliberately
+leaves the camera in its native mode.
 
 ---
 
@@ -205,12 +281,11 @@ Result: **1280×720 MJPEG, ~21 fps** (~330 datagrams/s).
 
 Contributions very welcome — open an issue or PR.
 
-- **Change resolution.** The camera exposes `GetCameraConfig`/`SetCameraConfig` (`type 0x0D`/`0x0E`) and
-  the library has resolution get/set calls. The underlying sensor advertises **1920×1080, 1280×720,
-  640×480, 640×400, 640×320** (from the device's USB UVC descriptors); the WiFi stream currently arrives
-  at **1280×720**. Switching almost certainly works via `SetCameraConfig`, but the exact payload isn't
-  decoded yet — **this is the most-wanted feature.** If you can capture the official app changing
-  resolution (root `tcpdump -i wlan0`, or analysis of `SetCameraConfig`), please share it.
+- ~~**Change resolution.**~~ **Done / documented** — see
+  [Camera configuration & resolution](#camera-configuration--resolution). The `SetCameraConfig` payload is
+  decoded and verified, but on the MS5 it's not useful: **1280×720 is the hard maximum** (higher modes are
+  silently ignored), 640×480 gives no fps gain, and switching at runtime can wedge the encoder. Other
+  i4season devices with a real higher-res sensor may benefit — reports welcome.
 - **Reliable long-running streams:** implement the ACK layer (`cProACKSet` / `check_sendack` in the
   library) if needed.
 - **Clean shutdown:** send a Stop/`caStop` on exit so the camera frees the session immediately.
