@@ -61,7 +61,8 @@ class MS5Client:
                 sock.sendto(self._msg(msg_type, mid, payload, length=length), (CAM, port))
                 sock.settimeout(timeout)
                 resp, src = sock.recvfrom(4096)
-                if src[0] == CAM:
+                if (src[0] == CAM and len(resp) >= 12
+                        and resp[:4] == b"\xee\xff\xee\xff"):
                     return resp
             except socket.timeout:
                 pass
@@ -74,6 +75,7 @@ class MS5Client:
         # video recv socket on an OS-assigned ephemeral port
         self.vid = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.vid.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.vid.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
         self.vid.bind(("0.0.0.0", 0))
         self.port = self.vid.getsockname()[1]
 
@@ -96,8 +98,9 @@ class MS5Client:
         self.ov = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._open_video()
 
-    def _open_video(self):
-        self._req(self.ov, P_OV, 0x0004, 1, payload=struct.pack("<H", self.port), length=0, retries=6)
+    def _open_video(self, retries=6, timeout=2):
+        self._req(self.ov, P_OV, 0x0004, 1, payload=struct.pack("<H", self.port),
+                  length=0, retries=retries, timeout=timeout)
 
     # ---- receive / reassemble loop (runs in its own thread) ----
     def run(self):
@@ -114,7 +117,7 @@ class MS5Client:
                 # stall watchdog: nudge the camera if no data for a while
                 now = time.time()
                 if now - self.last_rx > 1.0 and now - last_rearm > 1.0:
-                    self._open_video()
+                    self._open_video(retries=2, timeout=0.4)
                     last_rearm = now
                 continue
             except OSError:
@@ -152,7 +155,7 @@ class MS5Client:
 
     def get_frame(self, last_seq, timeout=2.0):
         with self._cond:
-            if self._seq == last_seq:
+            if self._seq == last_seq or self._latest is None:
                 self._cond.wait(timeout)
             return self._latest, self._seq
 
@@ -165,7 +168,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        c = self.client
         if self.path in ("/", "/index.html"):
             self._page()
         elif self.path == "/snapshot":

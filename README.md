@@ -2,7 +2,7 @@
 
 A clean, from-scratch client for the cheap **MS5 WiFi digital microscope** (and likely many similar
 i4season-based WiFi cameras/otoscopes/endoscopes). It connects to the camera over WiFi and streams its
-native **1280×720 MJPEG** video to your **browser, VLC, ffplay, or OBS** — at roughly **20+ fps**.
+native **1280×720 MJPEG** video to your **browser, VLC, ffplay, or OBS** — at roughly **~21 fps**.
 
 The official app (`DLscope`) is broken and barely manages **<2 fps**. This project gets the camera's full
 frame rate, runs anywhere Python runs, and **documents the entire reverse-engineered WiFi protocol** so
