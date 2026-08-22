@@ -47,6 +47,7 @@ class MS5Client:
         self._cond = threading.Condition()
         self._latest = None
         self._seq = 0
+        self._last_err = None        # last OSError seen by _req, if any
 
     # ---- protocol helpers ----
     @staticmethod
@@ -66,7 +67,13 @@ class MS5Client:
                     return resp
             except socket.timeout:
                 pass
-            except OSError:
+            except OSError as e:
+                # The OS actively refused the packet (e.g. EHOSTUNREACH) --
+                # distinct from plain silence, and worth surfacing as such:
+                # this is what a local Local-Network-permission/firewall
+                # block looks like, and it happens even though the camera
+                # itself replies fine to ping. See connect()'s error message.
+                self._last_err = e
                 break
             mid = (mid + 1) & 0xffff
         return None
@@ -91,6 +98,16 @@ class MS5Client:
                 "ssid":    d[81:113].split(b"\0")[0].decode("ascii", "replace"),
             }
         elif resp is None:
+            if self._last_err is not None:
+                raise IOError(
+                    "OS refused UDP to camera at %s:%d (%s).\n"
+                    "This is a LOCAL block, not the camera or WiFi -- check:\n"
+                    "  ping %s   (if that works, the camera is fine and reachable)\n"
+                    "  macOS: System Settings > Privacy & Security > Local Network -- "
+                    "toggle this terminal app off/on and fully quit+relaunch it "
+                    "(a stale grant here is a known quirk, esp. with iTerm2)\n"
+                    "  also check any third-party firewall/VPN/content-filter"
+                    % (CAM, P_CMD, self._last_err, CAM))
             raise IOError("No response from camera at %s:%d - are you on the camera WiFi?"
                           % (CAM, P_CMD))
 
